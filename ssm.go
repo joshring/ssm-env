@@ -1,49 +1,86 @@
 package ssm
 
 import (
+	"context"
 	"os"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
-// Parse sets the environment using AWS SSM. All parameters are fetched from
-// SSM using the provided path, and used to set the current environment.
+// SetEnvVarsUsingSSM sets environment variables using AWS SSM.
+//
+// All parameters are fetched from SSM using the provided path,
+// and used to set the current environment.
 // It is assumed that all parameters are of type "SecureString".
+//
+// Deprecated: use SetEnvVarsUsingSSM
 func Parse(path string) error {
+	return SetEnvVarsUsingSSM(path)
+}
+
+// SetEnvVarsUsingSSM sets environment variables using AWS SSM.
+//
+// All parameters are fetched from SSM using the provided path,
+// and used to set the current environment.
+// It is assumed that all parameters are of type "SecureString".
+func SetEnvVarsUsingSSM(path string) error {
+
 	if path == "" {
 		return nil
 	}
+
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
-	sess, err := session.NewSession()
+
+	awsConfig, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return err
 	}
-	svc := ssm.New(sess, aws.NewConfig())
+
+	// ssmClient is a new SSM session for interacting with SSM.
+	var ssmClient = ssm.NewFromConfig(awsConfig)
+
 	input := ssm.GetParametersByPathInput{
 		Path:           aws.String(path),
 		WithDecryption: aws.Bool(true),
 	}
-	var internalErr error
-	err = svc.GetParametersByPathPages(&input, func(out *ssm.GetParametersByPathOutput, lastPage bool) bool {
-		for _, param := range out.Parameters {
-			name := strings.TrimPrefix(aws.StringValue(param.Name), path)
-			internalErr = os.Setenv(name, aws.StringValue(param.Value))
-			if internalErr != nil {
-				return false
-			}
+
+	// Paginators are how pagination is now done in github.com/aws/aws-sdk-go-v2 style
+	// See: https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/migrate-gosdk.html
+	paginator := ssm.NewGetParametersByPathPaginator(ssmClient, &input)
+
+	for paginator.HasMorePages() {
+
+		paginatorOutput, err := paginator.NextPage(context.Background())
+		if err != nil {
+			return err
 		}
-		return true
-	})
-	if err != nil {
-		return err
-	}
-	if internalErr != nil {
-		return internalErr
+
+		for _, param := range paginatorOutput.Parameters {
+
+			// Skip empty secrets
+			if param.Name == nil || param.Value == nil {
+				continue
+			}
+
+			envVarName := strings.TrimPrefix(*param.Name, path)
+
+			// Skip obviously invalid environment variables
+			if envVarName == "" || *param.Value == "" {
+				continue
+			}
+
+			err = os.Setenv(envVarName, *param.Value)
+			if err != nil {
+				return err
+			}
+
+		}
+
 	}
 
 	return nil

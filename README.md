@@ -22,7 +22,7 @@ import (
 )
 
 func main() {
-  err := ssm.Parse("/ssm/path")
+  err := ssm.SetEnvVarsUsingSSM("/ssm/path")
   if err != nil {
     panic(err)
   }
